@@ -130,44 +130,80 @@ Instead, the original photos and thumbnails should be stored in **object storage
 
 ## 6. Component Responsibilities
 
-* **CDN:** Delivers photos and thumbnails from locations close to users, reducing latency and load on the application servers.
-* **Load Balancer:** Distributes incoming requests across multiple application servers so one server does not become a bottleneck.
-* **App Servers:** Handle application logic such as authentication, uploads, feed requests, and metadata operations.
-* **Cache:** Stores frequently requested data such as popular feed results to reduce repeated database queries.
-* **Primary Database:** Stores structured metadata such as users, follows, photo records, captions, and timestamps.
-* **Read Replica:** Handles read queries so that feed requests do not place all of the read load on the primary database.
-* **Object Storage:** Stores the large original photo files and generated thumbnails separately from the database.
-* **Queue:** Holds thumbnail-generation jobs so uploading a photo does not have to wait for thumbnail processing to finish.
-* **Worker:** Takes thumbnail jobs from the queue, creates thumbnails, and stores them in object storage.
+### CDN
 
-## 7. Photo Upload Flow
+The CDN caches and serves thumbnails and frequently requested images from locations close to users. This reduces latency and lowers the amount of traffic reaching the application servers.
 
-1. The user selects a photo and sends an upload request to SnapShare.
-2. The load balancer sends the request to an available application server.
-3. The application server validates the user and the uploaded file.
-4. The original photo is stored in object storage.
-5. The application stores the photo metadata and object-storage key in the primary database.
-6. The application places a thumbnail-generation job on the queue.
-7. The application can respond to the user without waiting for thumbnail generation to finish.
-8. A thumbnail worker takes the job from the queue.
-9. The worker downloads or accesses the original photo from object storage and creates a 50 KB thumbnail.
-10. The worker stores the thumbnail in object storage and records or updates its object-storage key.
-11. The CDN can then deliver the original photo and thumbnail efficiently when users view them.
+### Load Balancer
 
-## 8. Trade-offs
+The load balancer distributes incoming HTTP requests across multiple application servers. It also performs health checks so unhealthy servers can be removed from rotation.
 
-### Consistency vs. availability
+### Application Servers
 
-Using a queue for thumbnail generation means a newly uploaded photo may temporarily exist without its thumbnail. This improves upload speed and reliability, but users may briefly see a placeholder while the background job completes.
+Application servers handle authentication, feed requests, upload requests, metadata operations, and API responses. Multiple servers allow the system to continue serving traffic if one server fails.
 
-### Cache speed vs. data freshness
+### Cache
 
-Caching feed data makes reads much faster and reduces database load, but cached results can become temporarily stale. The system needs cache expiration or invalidation rules to balance performance with freshness.
+The cache stores frequently requested feed data and metadata so application servers do not need to query the database for every feed request. Cached data should have an expiration time or be invalidated when necessary.
 
-### Database replication vs. write complexity
+### Primary Database
 
-Using a read replica allows the system to handle many more feed reads, but replicated databases introduce additional infrastructure and can have a small delay before new data appears on the replica.
+The primary database stores structured metadata such as users, photo records, captions, timestamps, and object-storage keys. Writes are directed to the primary database.
 
-### Object storage vs. simpler database storage
+### Read Replica
 
-Object storage is much better suited to large photo files and scales independently, but it adds another service that the application must manage and monitor.
+The read replica handles read-heavy queries such as feed requests. Replication from the primary database increases read capacity without sending every read to the primary database.
+
+### Object Storage
+
+Object storage keeps the original photos and generated thumbnails. It is designed for large binary files and scales independently from the relational database.
+
+### Queue
+
+The queue receives background jobs such as thumbnail generation after an upload. This keeps slow processing work out of the user's upload request.
+
+### Worker
+
+Workers consume jobs from the queue and perform background processing such as resizing photos, generating thumbnails, validating files, and storing the resulting thumbnails in object storage.
+
+## 7. Upload Flow
+
+1. The user selects a photo in the client and starts an upload.
+2. The client sends the photo upload request to the load balancer.
+3. The load balancer sends the request to a healthy application server.
+4. The application server authenticates the user and validates the file type and size.
+5. The original photo is uploaded to object storage.
+6. The application server creates a photo metadata record in the primary database. The record contains information such as the user ID, object-storage key, upload time, and photo status.
+7. The application server places a thumbnail-generation job on the queue.
+8. The application server returns a successful upload response to the client without waiting for thumbnail generation to finish.
+9. A worker consumes the thumbnail job from the queue.
+10. The worker downloads or accesses the original image from object storage and generates the required thumbnail sizes.
+11. The worker stores the generated thumbnails in object storage.
+12. The worker updates the photo metadata so the thumbnails are marked as ready.
+13. Future feed requests retrieve the photo metadata from the database/cache and the image files from the CDN or object storage.
+
+This asynchronous queue and worker design keeps image processing out of the main HTTP request, allowing uploads to remain responsive even when many images need to be resized.
+
+## 8. Architectural Trade-offs
+
+### Strong Consistency vs. Performance
+
+Using read replicas improves read capacity and protects the primary database from heavy feed traffic, but replicas can have replication lag. A user may briefly see older data after uploading a photo. Strong consistency would reduce this problem but would increase database load and potentially increase response latency.
+
+### Cache Performance vs. Freshness
+
+Caching feed data reduces database queries and improves response times, but cached information can become stale. Short cache expiration times improve freshness but reduce the performance benefit of caching. Longer expiration times improve performance but require stronger cache invalidation.
+
+### Synchronous vs. Asynchronous Image Processing
+
+Processing thumbnails during the upload request would make the implementation simpler, but large images could make uploads slow and consume application-server resources. Using a queue and workers adds infrastructure complexity but allows image processing to happen asynchronously and keeps upload requests fast.
+
+### Object Storage vs. Database Storage
+
+Object storage is better suited to large binary files and scales independently from the relational database. However, it introduces another service that must be managed and secured. Storing images directly in the database would simplify the architecture but could increase database size, backup costs, and query performance problems.
+
+## 9. Availability and Failure Handling
+
+The system avoids single points of failure by running multiple application servers behind the load balancer. The database uses a primary and read replica, while object storage provides durable storage for uploaded files. Multiple workers can process queued jobs, and failed jobs can be retried from the queue.
+
+If an application server fails, the load balancer can route traffic to another healthy server. If a worker fails while processing a thumbnail, the job can remain available for another worker to retry. Database backups and replication provide additional protection against data loss.
