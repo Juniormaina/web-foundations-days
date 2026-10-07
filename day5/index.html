@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Day 5 - Users API</title>
+    <script src="users.js" defer></script>
+  </head>
+
+  <body>
+    <header>
+      <h1>Users Directory</h1>
+      <p>Load and search users from a REST API.</p>
+    </header>
+
+    <main>
+      <button id="load-users" type="button">Load Users</button>
+
+      <p id="status">Click "Load Users" to load users.</p>
+
+      <label for="filter-input">Filter users</label>
+      <input
+        type="search"
+        id="filter-input"
+        placeholder="Search by name..."
+      />
+
+      <ul id="users-list"></ul>
+    </main>
+  </body>
+</html>
