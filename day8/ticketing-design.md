@@ -120,149 +120,82 @@ standard HTTP status codes communicate success or failure.
 
 ### Browse Events
 
-```http
-GET /api/v1/events
-```
+`GET /api/v1/events` returns upcoming events.
 
-Returns upcoming events with basic information such as name, venue, date and
-ticket prices.
+Example: `{ "events": [{ "id": 101, "name": "Summer Music Festival", "venue": "Nairobi Arena", "date": "2026-12-20", "availableSeats": 4500 }] }`
 
-Example response:
-
-```json
-{
-  "events": [
-    {
-      "id": 101,
-      "name": "Summer Music Festival",
-      "venue": "Nairobi Arena",
-      "date": "2026-12-20",
-      "availableSeats": 4500
-    }
-  ]
-}
-```
+`GET /api/v1/events/:id` returns details for one event, including venue, date, time and ticket price.
 
 ### View Seats
 
-```http
-GET /api/v1/events/101/seats
-```
+`GET /api/v1/events/101/seats` returns seats and availability.
 
-Returns the seats for an event and their current availability.
-
-Example response:
-
-```json
-{
-  "eventId": 101,
-  "seats": [
-    {
-      "id": 501,
-      "number": "A12",
-      "status": "available",
-      "price": 2500
-    },
-    {
-      "id": 502,
-      "number": "A13",
-      "status": "held",
-      "price": 2500
-    }
-  ]
-}
-```
+Example: `{ "eventId": 101, "seats": [{ "id": 501, "number": "A12", "status": "available", "price": 2500 }, { "id": 502, "number": "A13", "status": "held", "price": 2500 }] }`
 
 ### Hold Seats
 
-```http
-POST /api/v1/events/101/holds
+`POST /api/v1/events/101/holds` creates a 10-minute hold on available seats.
+
+Request: `{ "seatIds": [501, 502] }`
+
+Response: `{ "holdId": 9001, "seatIds": [501, 502], "expiresAt": "2026-12-20T18:10:00Z" }`
+
+The hold is created inside a database transaction. If the seat is no longer
+available, the API returns `409 Conflict`.
+
+### Hold Transaction SQL
+
+```sql
+BEGIN;
+
+SELECT id, status, held_by, hold_expires_at
+FROM seats
+WHERE id = 501
+FOR UPDATE;
+
+UPDATE seats
+SET status = 'held',
+    held_by = 123,
+    hold_expires_at = CURRENT_TIMESTAMP + INTERVAL '10 minutes'
+WHERE id = 501
+  AND (
+      status = 'available'
+      OR (status = 'held' AND hold_expires_at < CURRENT_TIMESTAMP)
+  );
+
+COMMIT;
 ```
 
-Creates a temporary hold on available seats. A hold expires after a short
-period, such as 10 minutes, if the user does not complete payment.
+`SELECT ... FOR UPDATE` locks that seat row for the transaction, so two
+requests cannot treat the same seat as available at once. If the
+conditional `UPDATE` changes 1 row, the hold succeeded. If it changes 0
+rows, the seat is already held or sold and the API returns `409 Conflict`.
+The database is the final authority for seat ownership.
 
-Example request:
-
-```json
-{
-  "seatIds": [501, 502]
-}
-```
-
-Example response:
-
-```json
-{
-  "holdId": 9001,
-  "seatIds": [501, 502],
-  "expiresAt": "2026-12-20T18:10:00Z"
-}
-```
-
-The server must verify that the requested seats are still available inside a
-database transaction before creating the hold.
+Expired holds are not cleaned by scanning the whole seats table on every
+purchase request. A background worker uses an index on `hold_expires_at` to
+find expired holds and set those seats back to `available`.
 
 ### Pay for Held Seats
 
-```http
-POST /api/v1/orders
-```
+`POST /api/v1/orders` pays for seats currently held by the authenticated user
+and creates an order.
 
-Creates an order for seats currently held by the authenticated user and
-processes payment through the payment provider.
+Request: `{ "holdId": 9001, "paymentMethodId": "pm_example" }`
 
-Example request:
+Response: `{ "orderId": 7001, "status": "paid", "total": 5000, "tickets": [{ "ticketId": 30001, "seatId": 501 }, { "ticketId": 30002, "seatId": 502 }] }`
 
-```json
-{
-  "holdId": 9001,
-  "paymentMethodId": "pm_example"
-}
-```
-
-Example response:
-
-```json
-{
-  "orderId": 7001,
-  "status": "paid",
-  "total": 5000,
-  "tickets": [
-    {
-      "ticketId": 30001,
-      "seatId": 501
-    },
-    {
-      "ticketId": 30002,
-      "seatId": 502
-    }
-  ]
-}
-```
+This endpoint is complete. A successful purchase returns `201 Created` with
+the order ID, payment status, total and ticket records. Payment uses the
+payment provider. The database transaction then marks the seats as `sold`
+and inserts the order. `409 Conflict` is returned if the hold expired or
+another user already owns the seat.
 
 ### View Tickets
 
-```http
-GET /api/v1/tickets
-```
+`GET /api/v1/tickets` returns tickets for the authenticated user.
 
-Returns tickets belonging to the authenticated user.
-
-Example response:
-
-```json
-{
-  "tickets": [
-    {
-      "ticketId": 30001,
-      "eventId": 101,
-      "seatId": 501,
-      "status": "valid"
-    }
-  ]
-}
-```
+Example: `{ "tickets": [{ "ticketId": 30001, "eventId": 101, "seatId": 501, "status": "valid" }] }`
 
 ### API Error Handling
 
@@ -393,31 +326,20 @@ on the `orders` table.
 
 This means the database cannot contain two orders for the same seat.
 
-However, the application must also protect the **hold** operation with a
-database transaction.
+However, the application must also protect the **hold** operation with the
+`SELECT ... FOR UPDATE` transaction shown in the API section. Payment then
+changes the seat to `sold` and inserts the order. `UNIQUE (seat_id)` is a
+second database-level check if two purchases race.
 
-When a user tries to hold a seat, the application performs the following
-steps inside a transaction:
+### Expired Hold Cleanup
 
-1. Start a database transaction.
-2. Check the requested seat's current status.
-3. If the seat is available, change its status to `held`.
-4. Store the user's ID and hold expiration time.
-5. Commit the transaction.
-6. If another transaction tries to hold the same seat at the same time, the
-   database locking/transaction mechanism ensures that only one transaction
-   can successfully claim it.
+A background worker periodically processes expired holds. Instead of
+repeatedly scanning every seat, the system can use an indexed
+`hold_expires_at` column to find expired holds efficiently. The worker
+changes expired seats from `held` back to `available`.
 
-When payment is completed, another transaction changes the seat to `sold`
-and creates the order. The unique constraint on `orders.seat_id` provides an
-additional database-level safety check.
-
-If the hold has expired, the seat can be returned to `available` before
-another user is allowed to claim it.
-
-This combination of transactions, row-level locking or equivalent database
-concurrency control, and a unique constraint prevents two users from buying
-the same seat even during a very busy sale.
+This cleanup runs asynchronously, so a large number of expired holds does
+not create a sudden spike in the main ticket-purchase request path.
 
 ## 5. System Architecture
 
@@ -429,68 +351,15 @@ primary database.
 ### Architecture Diagram
 
 ```text
-                         ┌─────────────────┐
-                         │      Users      │
-                         └────────┬────────┘
-                                  │
-                                  ▼
-                         ┌─────────────────┐
-                         │       DNS       │
-                         └────────┬────────┘
-                                  │
-                                  ▼
-                         ┌─────────────────┐
-                         │       CDN       │
-                         │ Static content  │
-                         │ Cached event    │
-                         │ information     │
-                         └────────┬────────┘
-                                  │
-                                  ▼
-                       ┌─────────────────────┐
-                       │  Waiting Room /     │
-                       │  Rate Limiter       │
-                       └──────────┬──────────┘
-                                  │
-                                  ▼
-                       ┌─────────────────────┐
-                       │   Load Balancer     │
-                       └──────────┬──────────┘
-                                  │
-                    ┌─────────────┼─────────────┐
-                    ▼             ▼             ▼
-              ┌──────────┐ ┌──────────┐ ┌──────────┐
-              │ App      │ │ App      │ │ App      │
-              │ Server 1 │ │ Server 2 │ │ Server 3 │
-              └────┬─────┘ └────┬─────┘ └────┬─────┘
-                   │             │             │
-                   └─────────────┼─────────────┘
-                                 │
-                    ┌────────────┴────────────┐
-                    │                         │
-                    ▼                         ▼
-             ┌──────────────┐        ┌────────────────┐
-             │    Cache     │        │ Primary DB     │
-             │    Redis     │        │ Transactions   │
-             └──────────────┘        │ + seat locks   │
-                                     └───────┬────────┘
-                                             │
-                                             ▼
-                                      ┌──────────────┐
-                                      │ Read Replica │
-                                      └──────────────┘
+Users -> DNS -> CDN -> Waiting Room / Rate Limiter -> Load Balancer
+                      /        |        \
+            App Server 1  App Server 2  App Server 3
+                      \        |        /
+               Cache (Redis)   Primary DB (transactions + seat locks)
+                                      |
+                                Read Replica
 
-                 Purchase / background work
-                           │
-                           ▼
-                    ┌─────────────┐
-                    │    Queue    │
-                    └──────┬──────┘
-                           │
-                           ▼
-                    ┌─────────────┐
-                    │   Workers   │
-                    └─────────────┘
+Purchase background work: Queue -> Workers (emails, tickets, expired holds)
 ```
 
 ### Component Responsibilities
