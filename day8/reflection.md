@@ -1,0 +1,7 @@
+# Course Reflection
+
+The most difficult concept for me in this course was system design and thinking about how an application behaves when many people use it at the same time. At first, things like load balancing, caching, read replicas, queues and database transactions felt disconnected. Working through the scaling assignments helped me understand that each component solves a particular problem. The TicketHub assignment especially helped me understand why database transactions are important. It is easy to make a seat appear available in an application, but making sure two people cannot actually buy that seat requires the database to protect the data.
+
+Based on the feedback from my capstone, I would improve my architecture documentation. My Day 7 submission lost points because I had good calculations and the main architecture, but my document was incomplete and did not clearly explain the upload flow and trade-offs. That taught me that having the right ideas is not enough; the design also needs to be complete and clearly communicated.
+
+Next, I want to learn more about backend development, databases and deploying real applications. I would like to build APIs with Node.js, work more with PostgreSQL, and learn how authentication, payments, queues and cloud services work together in a real production system. I also want to keep improving my ability to design systems before writing the code.
